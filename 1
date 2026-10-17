@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101a20">
+  <title>Radio Amigos | Estación 001</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>📻 RADIO AMIGOS</h1>
+      <p>ESTACIÓN EXPERIMENTAL · ONLINE</p>
+    </div>
+    <span id="status">DESCONECTADO</span>
+  </header>
+
+  <main>
+    <section class="panel">
+      <p class="eyebrow">FRECUENCIA DIGITAL</p>
+      <h2>Tu música. Tu gente.</h2>
+      <p>Una radio para vos y tus amigos.</p>
+
+      <div class="spectrum-box">
+        <div class="section-title">
+          <span>ESPECTRO DE AUDIO</span>
+          <span id="spectrumStatus">EN ESPERA</span>
+        </div>
+        <canvas id="spectrum" width="600" height="180"></canvas>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>🎵 Al aire</h2>
+      <div id="playerArea">
+        <p>La radio todavía no está reproduciendo música.</p>
+      </div>
+      <p id="trackTitle">Sin canción seleccionada</p>
+      <audio id="audio" controls></audio>
+    </section>
+
+    <section class="panel">
+      <h2>🎙️ Charla en directo</h2>
+      <p>Entrá a la sala para hablar con tus amigos.</p>
+      <label for="nickname">Tu nombre</label>
+      <input id="nickname" maxlength="32" placeholder="Operador 01">
+
+      <div class="buttons">
+        <button id="joinVoice">Entrar a la charla</button>
+        <button id="muteVoice" disabled>Silenciar micrófono</button>
+        <button id="leaveVoice" disabled>Salir</button>
+      </div>
+
+      <div id="participants">
+        Todavía no hay participantes.
+      </div>
+      <p class="note">
+        La voz requiere conexión a Internet, permiso para usar
+        el micrófono y configuración del servidor de audio.
+      </p>
+    </section>
+
+    <section class="panel">
+      <h2>📡 Programación</h2>
+      <div id="playlist">
+        <p>La lista de canciones aparecerá aquí.</p>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>🔐 Cabina del operador</h2>
+
+      <form id="loginForm">
+        <label for="email">Correo electrónico</label>
+        <input id="email" type="email" autocomplete="username"
+               placeholder="tu@email.com" required>
+
+        <label for="password">Contraseña</label>
+        <input id="password" type="password"
+               autocomplete="current-password" required>
+
+        <button type="submit">Iniciar sesión</button>
+      </form>
+
+      <div id="adminPanel" hidden>
+        <h3>Panel privado</h3>
+
+        <label for="mp3File">Subir canción MP3</label>
+        <input id="mp3File" type="file" accept=".mp3,audio/mpeg">
+
+        <label for="songTitle">Título</label>
+        <input id="songTitle" placeholder="Nombre de la canción">
+
+        <button id="uploadSong">Subir canción</button>
+
+        <hr>
+
+        <label for="youtubeUrl">Enlace de YouTube</label>
+        <input id="youtubeUrl" type="url"
+               placeholder="https://www.youtube.com/watch?v=...">
+
+        <button id="addYoutube">Agregar video</button>
+        <button id="logout">Cerrar sesión</button>
+      </div>
+
+      <p id="authMessage" class="note">
+        Iniciá sesión para administrar la emisora.
+      </p>
+    </section>
+  </main>
+
+  <footer>
+    RADIO AMIGOS · PROYECTO EXPERIMENTAL POR INTERNET
+  </footer>
+
+  <script type="module" src="main.js"></script>
+</body>
+</html>
