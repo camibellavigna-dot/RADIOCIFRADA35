@@ -1,0 +1,72 @@
+import { createClient } from "npm:@supabase/supabase-js@2";
+import { AccessToken } from "npm:livekit-server-sdk";
+
+Deno.serve(async (req: Request) => {
+  if (req.method !== "POST") {
+    return new Response("Method not allowed", { status: 405 });
+  }
+
+  const authorization = req.headers.get("Authorization");
+  if (!authorization) {
+    return Response.json({ error: "No autorizado" }, { status: 401 });
+  }
+
+  const supabase = createClient(
+    Deno.env.get("SUPABASE_URL")!,
+    Deno.env.get("SUPABASE_ANON_KEY")!,
+    {
+      global: {
+        headers: { Authorization: authorization }
+      }
+    }
+  );
+
+  const { data: { user }, error } = await supabase.auth.getUser();
+
+  if (error || !user) {
+    return Response.json({ error: "Sesión inválida" }, { status: 401 });
+  }
+
+  let body: { room?: string };
+
+  try {
+    body = await req.json();
+  } catch {
+    return Response.json({ error: "JSON inválido" }, { status: 400 });
+  }
+
+  // Por ahora, todos los usuarios autenticados entran a esta sala.
+  const room = body.room;
+
+  if (room !== "radio-amigos") {
+    return Response.json({ error: "Sala no permitida" }, { status: 403 });
+  }
+
+  const apiKey = Deno.env.get("LIVEKIT_API_KEY");
+  const apiSecret = Deno.env.get("LIVEKIT_API_SECRET");
+  const livekitUrl = Deno.env.get("LIVEKIT_URL");
+
+  if (!apiKey || !apiSecret || !livekitUrl) {
+    return Response.json(
+      { error: "LiveKit no está configurado en el servidor" },
+      { status: 500 }
+    );
+  }
+
+  const token = new AccessToken(apiKey, apiSecret, {
+    identity: user.id,
+    ttl: "1h"
+  });
+
+  token.addGrant({
+    roomJoin: true,
+    room,
+    canPublish: true,
+    canSubscribe: true
+  });
+
+  return Response.json({
+    token: await token.toJwt(),
+    url: livekitUrl
+  });
+});
