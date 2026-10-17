@@ -1,0 +1,567 @@
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { Room, RoomEvent, Track } from "https://esm.sh/livekit-client@2";
+
+// Reemplazá estos valores por los de tus proyectos.
+const SUPABASE_URL = "https://TU-PROYECTO.supabase.co";
+const SUPABASE_ANON_KEY = "TU_CLAVE_PUBLICA_ANON";
+const LIVEKIT_URL = "wss://TU-SERVIDOR.livekit.cloud";
+
+const configured =
+  !SUPABASE_URL.includes("TU-PROYECTO") &&
+  !SUPABASE_ANON_KEY.includes("TU_CLAVE");
+
+const supabase = configured
+  ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+  : null;
+
+const $ = (id) => document.getElementById(id);
+
+let currentUser = null;
+let isAdmin = false;
+let currentTrackId = null;
+let voiceRoom = null;
+let muted = false;
+let audioContext = null;
+let animationFrame = null;
+
+function message(text) {
+  if ($("authMessage")) $("authMessage").textContent = text;
+}
+
+function status(text) {
+  if ($("status")) $("status").textContent = text;
+}
+
+function escapeHtml(value = "") {
+  return String(value).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;"
+  })[c]);
+}
+
+function requireConfiguration() {
+  if (!configured) {
+    status("Falta configurar Supabase en main.js.");
+    message("Completá SUPABASE_URL y SUPABASE_ANON_KEY.");
+    return false;
+  }
+  return true;
+}
+
+// ---------- Inicio y autenticación ----------
+
+async function checkAdmin(user) {
+  if (!user) return false;
+
+  const { data, error } = await supabase
+    .from("user_roles")
+    .select("role")
+    .eq("user_id", user.id)
+    .maybeSingle();
+
+  if (error) {
+    console.error(error);
+    return false;
+  }
+
+  return data?.role === "admin";
+}
+
+async function updateAuthUI() {
+  isAdmin = await checkAdmin(currentUser);
+
+  if ($("adminPanel")) $("adminPanel").hidden = !isAdmin;
+  if ($("loginForm")) $("loginForm").hidden = isAdmin;
+
+  if (currentUser && !isAdmin) {
+    message("Sesión iniciada. Tu cuenta no tiene permisos de administrador.");
+  } else if (isAdmin) {
+    message("Sesión de administrador iniciada.");
+  }
+}
+
+if ($("loginForm")) {
+  $("loginForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!requireConfiguration()) return;
+
+    const email = $("email").value.trim();
+    const password = $("password").value;
+
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email,
+      password
+    });
+
+    if (error) {
+      message("No se pudo iniciar sesión: " + error.message);
+      return;
+    }
+
+    currentUser = data.user;
+    await updateAuthUI();
+
+    if (!isAdmin) {
+      await supabase.auth.signOut();
+      currentUser = null;
+      await updateAuthUI();
+      message("Esta cuenta no es administradora.");
+    }
+  });
+}
+
+if ($("logout")) {
+  $("logout").addEventListener("click", async () => {
+    await leaveVoice();
+    await supabase?.auth.signOut();
+    currentUser = null;
+    isAdmin = false;
+    await updateAuthUI();
+    message("Sesión cerrada.");
+  });
+}
+
+// ---------- Lista de canciones ----------
+
+function youtubeEmbedUrl(track) {
+  if (track.video_id) {
+    return `https://www.youtube-nocookie.com/embed/${encodeURIComponent(track.video_id)}`;
+  }
+  return "";
+}
+
+function renderPlaylist(tracks) {
+  const list = $("playlist");
+  if (!list) return;
+
+  if (!tracks.length) {
+    list.innerHTML = "<p>Todavía no hay canciones cargadas.</p>";
+    return;
+  }
+
+  list.innerHTML = tracks.map((track) => `
+    <div class="track-item">
+      <div>
+        <strong>${escapeHtml(track.title)}</strong>
+        <small>${track.type === "youtube" ? "YouTube" : "MP3"}</small>
+      </div>
+      <button type="button" data-play="${escapeHtml(track.id)}">
+        Reproducir
+      </button>
+      ${isAdmin ? `<button type="button" data-delete="${escapeHtml(track.id)}">Eliminar</button>` : ""}
+    </div>
+  `).join("");
+
+  list.querySelectorAll("[data-play]").forEach((button) => {
+    button.addEventListener("click", () => playTrack(button.dataset.play, tracks));
+  });
+
+  list.querySelectorAll("[data-delete]").forEach((button) => {
+    button.addEventListener("click", () => deleteTrack(button.dataset.delete));
+  });
+}
+
+async function loadPlaylist() {
+  if (!requireConfiguration()) return;
+
+  const { data, error } = await supabase
+    .from("tracks")
+    .select("id,title,type,url,video_id,created_at")
+    .order("created_at", { ascending: false });
+
+  if (error) {
+    console.error(error);
+    status("No se pudo cargar la lista. Revisá las tablas y permisos de Supabase.");
+    return;
+  }
+
+  renderPlaylist(data || []);
+}
+
+async function playTrack(id, tracks) {
+  const track = tracks.find((item) => item.id === id);
+  if (!track) return;
+
+  currentTrackId = track.id;
+  stopVisualizer();
+
+  if ($("trackTitle")) $("trackTitle").textContent = track.title;
+  if ($("playerArea")) $("playerArea").innerHTML = "";
+
+  if (track.type === "youtube") {
+    if ($("audio")) $("audio").hidden = true;
+
+    const embed = youtubeEmbedUrl(track);
+    if (!embed) {
+      status("No se pudo obtener el video de YouTube.");
+      return;
+    }
+
+    $("playerArea").innerHTML = `
+      <iframe
+        src="${embed}"
+        title="${escapeHtml(track.title)}"
+        width="100%"
+        height="240"
+        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+        referrerpolicy="strict-origin-when-cross-origin"
+        allowfullscreen>
+      </iframe>
+    `;
+    status("Reproduciendo desde el reproductor oficial de YouTube.");
+    return;
+  }
+
+  if ($("audio")) {
+    $("audio").hidden = false;
+    $("audio").src = track.url;
+    $("audio").load();
+
+    try {
+      await $("audio").play();
+      startVisualizer();
+      status("Reproduciendo MP3.");
+    } catch (error) {
+      console.warn(error);
+      status("Tocá reproducir en el reproductor para comenzar.");
+    }
+  }
+}
+
+async function deleteTrack(id) {
+  if (!isAdmin) return;
+  if (!confirm("¿Eliminar esta canción de la lista?")) return;
+
+  const { data: track, error: readError } = await supabase
+    .from("tracks")
+    .select("id,type,url")
+    .eq("id", id)
+    .maybeSingle();
+
+  if (readError || !track) {
+    message("No se encontró la canción.");
+    return;
+  }
+
+  const { error } = await supabase.from("tracks").delete().eq("id", id);
+  if (error) {
+    message("No se pudo eliminar: " + error.message);
+    return;
+  }
+
+  // Los archivos del almacenamiento se pueden borrar desde el panel
+  // de Supabase si querés liberar espacio.
+  await loadPlaylist();
+  message("Canción eliminada de la lista.");
+}
+
+// ---------- Subir MP3 (solo administrador) ----------
+
+if ($("uploadSong")) {
+  $("uploadSong").addEventListener("click", async () => {
+    if (!isAdmin) return message("Necesitás una cuenta administradora.");
+    if (!requireConfiguration()) return;
+
+    const file = $("mp3File")?.files?.[0];
+    const title = $("songTitle")?.value.trim();
+
+    if (!file) return message("Elegí un archivo MP3.");
+    if (!title) return message("Escribí el título de la canción.");
+    if (file.type !== "audio/mpeg" && !file.name.toLowerCase().endsWith(".mp3")) {
+      return message("El archivo debe ser MP3.");
+    }
+    if (file.size > 15 * 1024 * 1024) {
+      return message("El archivo supera el límite de 15 MB de este ejemplo.");
+    }
+
+    message("Subiendo archivo…");
+
+    const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+    const path = `${crypto.randomUUID()}-${safeName}`;
+
+    const { error: uploadError } = await supabase.storage
+      .from("radio-mp3")
+      .upload(path, file, {
+        contentType: "audio/mpeg",
+        upsert: false
+      });
+
+    if (uploadError) {
+      message("Error al subir el MP3: " + uploadError.message);
+      return;
+    }
+
+    const { data: publicData } = supabase.storage
+      .from("radio-mp3")
+      .getPublicUrl(path);
+
+    const { error: insertError } = await supabase.from("tracks").insert({
+      title,
+      type: "mp3",
+      url: publicData.publicUrl,
+      created_by: currentUser.id
+    });
+
+    if (insertError) {
+      message("El archivo se subió, pero no se pudo guardar en la lista: " + insertError.message);
+      return;
+    }
+
+    $("mp3File").value = "";
+    $("songTitle").value = "";
+    message("MP3 subido correctamente.");
+    await loadPlaylist();
+  });
+}
+
+// ---------- Añadir un video de YouTube ----------
+
+function getYouTubeId(input) {
+  try {
+    const url = new URL(input);
+
+    if (url.hostname === "youtu.be") {
+      return url.pathname.split("/").filter(Boolean)[0] || null;
+    }
+
+    if (
+      url.hostname.endsWith("youtube.com") ||
+      url.hostname.endsWith("youtube-nocookie.com")
+    ) {
+      if (url.pathname === "/watch") return url.searchParams.get("v");
+      const parts = url.pathname.split("/").filter(Boolean);
+      if (["embed", "shorts", "live"].includes(parts[0])) return parts[1] || null;
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+if ($("addYoutube")) {
+  $("addYoutube").addEventListener("click", async () => {
+    if (!isAdmin) return message("Necesitás una cuenta administradora.");
+    if (!requireConfiguration()) return;
+
+    const input = $("youtubeUrl")?.value.trim();
+    if (!input) return message("Pegá un enlace de YouTube.");
+
+    const videoId = getYouTubeId(input);
+    if (!videoId) {
+      message("Ese enlace no parece ser de un video de YouTube válido.");
+      return;
+    }
+
+    const { error } = await supabase.from("tracks").insert({
+      title: "Video de YouTube",
+      type: "youtube",
+      video_id: videoId,
+      url: input,
+      created_by: currentUser.id
+    });
+
+    if (error) {
+      message("No se pudo guardar el video: " + error.message);
+      return;
+    }
+
+    $("youtubeUrl").value = "";
+    message("Video agregado a la lista.");
+    await loadPlaylist();
+  });
+}
+
+// ---------- Visualizador de audio ----------
+
+function stopVisualizer() {
+  if (animationFrame) cancelAnimationFrame(animationFrame);
+  animationFrame = null;
+}
+
+function startVisualizer() {
+  const audio = $("audio");
+  const canvas = $("spectrum");
+  if (!audio || !canvas) return;
+
+  try {
+    if (!audioContext) {
+      audioContext = new AudioContext();
+      const source = audioContext.createMediaElementSource(audio);
+      const analyser = audioContext.createAnalyser();
+      analyser.fftSize = 128;
+      source.connect(analyser);
+      analyser.connect(audioContext.destination);
+      audio._analyser = analyser;
+    }
+
+    const analyser = audio._analyser;
+    if (!analyser) return;
+
+    const ctx = canvas.getContext("2d");
+    const data = new Uint8Array(analyser.frequencyBinCount);
+
+    function draw() {
+      animationFrame = requestAnimationFrame(draw);
+      analyser.getByteFrequencyData(data);
+
+      const width = canvas.width = canvas.clientWidth * devicePixelRatio;
+      const height = canvas.height = canvas.clientHeight * devicePixelRatio;
+      ctx.clearRect(0, 0, width, height);
+
+      const barWidth = width / data.length;
+      data.forEach((value, index) => {
+        const barHeight = (value / 255) * height;
+        ctx.fillStyle = "#48e68b";
+        ctx.fillRect(index * barWidth, height - barHeight, Math.max(1, barWidth - 2), barHeight);
+      });
+    }
+
+    if (audioContext.state === "suspended") audioContext.resume();
+    draw();
+  } catch (error) {
+    console.warn("El visualizador no está disponible:", error);
+  }
+}
+
+// ---------- Voz en vivo con LiveKit ----------
+
+function renderParticipants() {
+  if (!$("participants")) return;
+
+  const names = [];
+  if (voiceRoom?.localParticipant) {
+    names.push(voiceRoom.localParticipant.identity + " (vos)");
+  }
+
+  voiceRoom?.remoteParticipants?.forEach((participant) => {
+    names.push(participant.identity);
+  });
+
+  $("participants").innerHTML = names.length
+    ? names.map((name) => `<li>${escapeHtml(name)}</li>`).join("")
+    : "<li>No hay nadie conectado.</li>";
+}
+
+async function joinVoice() {
+  if (!requireConfiguration()) return;
+  if (!currentUser) {
+    status("Para usar la voz, primero iniciá sesión con una cuenta autorizada.");
+    return;
+  }
+  if (voiceRoom) return;
+
+  try {
+    status("Conectando a la sala de voz…");
+
+    const { data, error } = await supabase.functions.invoke("livekit-token", {
+      body: { room: "radio-amigos" }
+    });
+
+    if (error) throw error;
+    if (!data?.token || !data?.url) {
+      throw new Error("La función no devolvió el token y la URL de LiveKit.");
+    }
+
+    voiceRoom = new Room();
+
+    voiceRoom.on(RoomEvent.ParticipantConnected, renderParticipants);
+    voiceRoom.on(RoomEvent.ParticipantDisconnected, renderParticipants);
+    voiceRoom.on(RoomEvent.Disconnected, () => {
+      voiceRoom = null;
+      renderParticipants();
+      status("Desconectado de la sala de voz.");
+    });
+
+    voiceRoom.on(RoomEvent.TrackSubscribed, (track) => {
+      if (track.kind === Track.Kind.Audio) {
+        const element = track.attach();
+        element.autoplay = true;
+        element.style.display = "none";
+        document.body.appendChild(element);
+      }
+    });
+
+    voiceRoom.on(RoomEvent.TrackUnsubscribed, (track) => {
+      track.detach().forEach((element) => element.remove());
+    });
+
+    await voiceRoom.connect(data.url, data.token);
+    await voiceRoom.localParticipant.setMicrophoneEnabled(true);
+
+    muted = false;
+    if ($("muteVoice")) $("muteVoice").textContent = "Silenciar micrófono";
+    renderParticipants();
+    status("Conectado a la sala de voz.");
+  } catch (error) {
+    console.error(error);
+    voiceRoom = null;
+    status("No se pudo conectar a la voz. Revisá el token y la configuración de LiveKit.");
+  }
+}
+
+async function leaveVoice() {
+  if (voiceRoom) {
+    await voiceRoom.disconnect();
+    voiceRoom = null;
+  }
+  muted = false;
+  if ($("muteVoice")) $("muteVoice").textContent = "Silenciar micrófono";
+  renderParticipants();
+}
+
+if ($("joinVoice")) $("joinVoice").addEventListener("click", joinVoice);
+
+if ($("muteVoice")) {
+  $("muteVoice").addEventListener("click", async () => {
+    if (!voiceRoom) return;
+    muted = !muted;
+    await voiceRoom.localParticipant.setMicrophoneEnabled(!muted);
+    $("muteVoice").textContent = muted ? "Activar micrófono" : "Silenciar micrófono";
+  });
+}
+
+if ($("leaveVoice")) $("leaveVoice").addEventListener("click", leaveVoice);
+
+// ---------- Sincronización entre visitantes ----------
+
+async function startRealtime() {
+  const channel = supabase.channel("radio-amigos-updates");
+
+  channel
+    .on("postgres_changes", { event: "*", schema: "public", table: "tracks" }, loadPlaylist)
+    .subscribe();
+
+  return channel;
+}
+
+async function init() {
+  if (!requireConfiguration()) return;
+
+  const { data } = await supabase.auth.getSession();
+  currentUser = data.session?.user || null;
+  await updateAuthUI();
+  await loadPlaylist();
+  await startRealtime();
+  renderParticipants();
+
+  supabase.auth.onAuthStateChange(async (_event, session) => {
+    currentUser = session?.user || null;
+    await updateAuthUI();
+  });
+
+  status("Radio Amigos está lista.");
+}
+
+if (configured) {
+  init().catch((error) => {
+    console.error(error);
+    status("Error al iniciar. Revisá la configuración de Supabase.");
+  });
+} else {
+  status("Configurá Supabase para activar Radio Amigos.");
+  message("Completá los valores de configuración al comienzo de main.js.");
+}
